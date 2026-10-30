@@ -3017,3 +3017,116 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         )
 
         return df
+
+    def average_cost(
+        self,
+        groupby_time: bool = True,
+        bus_carrier: Sequence[str] | str | None = None,
+        round: int | None = None,
+    ) -> pd.DataFrame:
+        """Calculate the average cost of the energy supplied and withdrawn by components.
+
+        Currency is currency/MWh or currency/unit_{bus_carrier} where
+        unit_{bus_carrier} is the unit of the bus carrier.
+
+        Unlike the marginal [prices][pypsa.statistics.StatisticsAccessor.prices], the
+        average cost allocates the actual system costs to the energy flows. Within a
+        snapshot, all energy supplied to a bus is mixed, so every withdrawal from that
+        bus pays the same average cost (proportional sharing). The supply cost of a
+        component includes its capital expenditure, fixed operation and maintenance
+        costs and unit commitment costs, spread over all energy it supplies, plus its
+        operational expenditure of the snapshot.
+
+        - Branches (links, processes, lines and transformers) pass the cost of their
+          inputs plus their own costs on to their primary output, which is the
+          supplying port with the lowest index (e.g. `bus1` of a link in forward flow,
+          `bus0` in reverse flow). Further outputs (e.g. oxygen of an electrolyser) are
+          free.
+        - Storage units and stores pass on the average cost of the energy they hold.
+          For a cyclic storage, the energy above its minimum level is tracked from the
+          first snapshot at the minimum level. For a non-cyclic storage, the initial
+          energy is free.
+
+        All costs of components that supply energy are passed on to the final
+        withdrawals, also for energy flowing in loops. Costs of components that do not
+        supply any energy (e.g. idle capacity) are not allocated.
+
+        The calculation solves one sparse linear system for all buses and snapshots,
+        which can be expensive for large networks. It is therefore not part of
+        [`n.statistics()`][pypsa.statistics.StatisticsAccessor].
+
+        Parameters
+        ----------
+        groupby_time : bool, default: True
+            If True, return the energy weighted average over all snapshots, separately
+            for supply and withdrawal. If False, return the average cost of each
+            snapshot.
+        bus_carrier : str | Sequence[str] | None, default=None
+            Filter by carrier of buses. If specified, only considers flows at buses
+            with the given carrier(s).
+        round : int | None, default=None
+            Number of decimal places to round the result to. Defaults to module wide
+            option (default: 2). See `pypsa.options.params.statistics.describe()` for
+            more information.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index with the levels `component`, `name` and `bus`. With
+            `groupby_time=True`, the columns `withdrawal` and `supply` hold the average
+            cost of the energy withdrawn from and supplied to the bus. With
+            `groupby_time=False`, the columns are the snapshots.
+
+        Examples
+        --------
+        >>> n.statistics.average_cost().loc["Generator"]
+                                    withdrawal     supply
+        name            bus
+        Frankfurt Gas   Frankfurt          NaN   72.90095
+        Frankfurt Wind  Frankfurt          NaN  497.54079
+        Manchester Wind Manchester         NaN  704.68985
+        Norway Wind     Norway             NaN  433.84790
+
+        """
+        from pypsa.networks import Network  # noqa: PLC0415
+        from pypsa.statistics.average_cost import (  # noqa: PLC0415
+            EPS,
+            calculate_average_cost,
+        )
+
+        if not isinstance(self._n, Network):
+            msg = "The average cost is not supported for network collections yet."
+            raise NotImplementedError(msg)
+
+        energy, cost = calculate_average_cost(self._n)
+
+        if bus_carrier is not None:
+            if isinstance(bus_carrier, str):
+                bus_carrier = [bus_carrier]
+            carriers = self._n.c.buses.static.carrier
+            keep = carriers.reindex(energy.columns.get_level_values("bus")).isin(
+                bus_carrier
+            )
+            energy = energy.loc[:, keep.to_numpy()]
+            cost = cost.loc[:, keep.to_numpy()]
+
+        if groupby_time:
+            weighted = {}
+            for column, mask in (
+                ("withdrawal", energy < -EPS),
+                ("supply", energy > EPS),
+            ):
+                mask &= cost.notna()
+                weighted[column] = (cost * energy).where(mask).sum() / energy.where(
+                    mask
+                ).sum()
+            df = pd.DataFrame(weighted)
+        else:
+            df = cost.T
+
+        df.attrs["name"] = "Average Cost"
+        df.attrs["unit"] = "currency / MWh"
+
+        return self._apply_option_kwargs(
+            df, drop_zero=False, round=round, nice_names=False
+        )

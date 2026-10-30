@@ -36,6 +36,7 @@ Currently supported metrics are:
 - [System costs][pypsa.statistics.StatisticsAccessor.system_cost]: The total system costs after optimization, including capital and operational expenditure.
 - [Marginal prices][pypsa.statistics.StatisticsAccessor.prices]: The marginal prices at the buses for all snapshots.
 - [Transmission][pypsa.statistics.StatisticsAccessor.transmission]: The energy transmitted through transmission components (links, lines, transformers connecting to buses of the same carrier).
+- [Average cost][pypsa.statistics.StatisticsAccessor.average_cost]: The average cost of the energy supplied and withdrawn by all components, allocating the system costs to the energy flows (see [below](#average-cost)).
 
 These metrics can be calculated using the `n.statistics` accessor, for instance:
 
@@ -54,6 +55,39 @@ Generator  gas        1000.0
             wind          0.0
             solar         0.0
 Name: opex, dtype: float64
+```
+
+### Average Cost
+
+While the [marginal prices][pypsa.statistics.StatisticsAccessor.prices] give the cost
+of one more unit of energy, [`n.statistics.average_cost()`][pypsa.statistics.StatisticsAccessor.average_cost]
+allocates the actual system costs to the energy flows, e.g. to get the cost of the
+hydrogen supplied to a load including the electricity, the electrolyser and the storage
+it passed through. The allocation follows these rules:
+
+- Within a snapshot, all energy supplied to a bus is mixed, so every withdrawal from
+  that bus pays the same average cost (proportional sharing).
+- A component's capital expenditure, fixed operation and maintenance costs and unit
+  commitment costs are spread over all energy it supplies in the modelled snapshots.
+  Its operational expenditure is attributed to the energy it supplies in the same
+  snapshot.
+- Branches pass the cost of their inputs plus their own costs on to their primary
+  output, the supplying port with the lowest index. Further outputs (e.g. oxygen of an
+  electrolyser) are free.
+- Storage units and stores pass on the average cost of the energy they hold.
+
+All costs of components supplying energy reach the final withdrawals, also for energy
+flowing in loops. As the costs are taken from the [objective](optimization/objective.md),
+the capital costs are spread over the energy of the modelled snapshots as weighted by
+the [snapshot weightings](design.md). Make sure the snapshot weightings represent the
+period the capital costs refer to (usually a year).
+
+The method solves one sparse linear system for all buses and snapshots, so it is not
+part of `n.statistics()` and has to be called explicitly:
+
+``` py
+>>> n.statistics.average_cost()  # doctest: +SKIP
+>>> n.statistics.average_cost(groupby_time=False)  # doctest: +SKIP
 ```
 
 ## Parameters
