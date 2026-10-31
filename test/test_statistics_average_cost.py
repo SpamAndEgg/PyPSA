@@ -278,6 +278,39 @@ def test_stand_by_cost():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
+def test_start_up_and_shut_down_cost():
+    """Start-up and shut-down costs occur once per event and are spread like capex.
+
+    The electrolyser starts once (10 currency) and shuts down once (4 currency) for
+    2 MWh hydrogen, so the hydrogen costs 10 / 0.8 + 14 / 2 = 19.5 currency/MWh.
+    """
+    n = network_with_buses(range(3), "electricity", "hydrogen")
+    n.add("Generator", "grid", bus="electricity", p_nom=10, marginal_cost=10)
+    n.add(
+        "Link",
+        "electrolysis",
+        bus0="electricity",
+        bus1="hydrogen",
+        efficiency=0.8,
+        p_nom=2,
+        p_min_pu=0.5,
+        committable=True,
+        up_time_before=0,
+        start_up_cost=10,
+        shut_down_cost=4,
+    )
+    n.add("Load", "hydrogen demand", bus="hydrogen", p_set=[1, 1, 0])
+    n.optimize()
+
+    assert n.statistics.opex(cost_types="start_up_cost", round=0).sum() == 10
+    assert n.statistics.opex(cost_types="shut_down_cost", round=0).sum() == 4
+    df = n.statistics.average_cost(round=10)
+    assert df.at[
+        ("Load", "hydrogen demand", "hydrogen"), "withdrawal"
+    ] == pytest.approx(19.5)
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
 def test_meshed_ac_dc_network(ac_dc_solved):
     """Loads pay all system costs in a meshed network with lines and links."""
     n = ac_dc_solved
