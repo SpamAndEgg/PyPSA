@@ -235,6 +235,42 @@ def test_standing_loss_cyclic_wraps_around():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
+def test_electrolyser_with_capital_cost_and_storage():
+    """Hydrogen from an electrolyser with capital cost, partly stored with losses.
+
+    Hour 1: 1.25 MWh electricity at 10 currency/MWh plus 2.5 capital cost make 1 MWh
+    hydrogen for 15 currency/MWh. Half is stored and loses 10 % until hour 2:
+    7.5 / 0.45 = 16.67 currency/MWh.
+    """
+    n = network_with_buses(range(2), "electricity", "hydrogen")
+    n.add("Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 50])
+    n.add(
+        "Link",
+        "electrolyser",
+        bus0="electricity",
+        bus1="hydrogen",
+        efficiency=0.8,
+        p_nom=1.25,
+        capital_cost=2,
+    )
+    n.add(
+        "StorageUnit",
+        "hydrogen storage",
+        bus="hydrogen",
+        p_nom=1,
+        max_hours=1,
+        standing_loss=0.1,
+    )
+    n.add("Load", "hydrogen demand", bus="hydrogen", p_set=[0.5, 0.45])
+    n.optimize()
+
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(
+        cost[("Load", "hydrogen demand", "hydrogen")], [15, 7.5 / 0.45]
+    )
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
 def test_marginal_cost_storage():
     """Costs for holding energy are paid when the energy is discharged."""
     n = network_with_buses(range(2), "electricity")
