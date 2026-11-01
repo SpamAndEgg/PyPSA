@@ -170,16 +170,18 @@ def calculate_average_cost(n: Network) -> tuple[pd.DataFrame, pd.DataFrame]:
     discharge_share = np.zeros((n_snapshots, len(storage_flows)))
     previous = np.full((n_snapshots, len(storage_flows)), -1)
     for i_storage, i in enumerate(storage_flows):
-        positions, held_before, held_after = _get_storage_tracking(
+        positions, held_available, held_after = _get_storage_tracking(
             n, flow_component[i], columns.get_level_values("name")[i]
         )
         e = energy[positions, i]
         discharging = e > EPS
         charging = e < -EPS
+        # The standing loss of a snapshot affects all held energy, so the discharged
+        # share refers to the energy left after the loss.
         with np.errstate(divide="ignore", invalid="ignore"):
             share = np.where(
-                held_before > EPS,
-                np.clip((held_before - held_after) / held_before, 0.0, 1.0),
+                held_available > EPS,
+                np.clip((held_available - held_after) / held_available, 0.0, 1.0),
                 1.0,
             )
         share = np.where(discharging, share, 0.0)
@@ -405,7 +407,11 @@ def _get_local_cost(
 def _get_storage_tracking(
     n: Network, c: str, name: str
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Get the tracking order and the held energy before and after each snapshot [MWh].
+    """Get the tracking order and the held energy of each snapshot [MWh].
+
+    Returns the snapshot positions in tracking order, the held energy left after the
+    standing loss of each snapshot (before charging and discharging), and the held energy
+    at the end of each snapshot.
 
     For a cyclic storage, the tracking starts after the first snapshot at the minimum
     energy level and only the energy above the minimum is tracked, so it starts empty.
@@ -426,16 +432,26 @@ def _get_storage_tracking(
     if static.at[name, cyclic_attr]:
         # The level at the start of the first snapshot is the level at the end of the
         # last snapshot.
-        start = int(np.argmin(np.concatenate((level[-1:], level[:-1]))))
+        level_before = np.concatenate((level[-1:], level[:-1]))
+        start = int(np.argmin(level_before))
         baseline = float(level.min())
-        held_start = 0.0
     else:
         start = 0
         initial = float(static.at[name, initial_attr])
+        level_before = np.concatenate(([initial], level[:-1]))
         baseline = min(initial, float(level.min()))
-        held_start = initial - baseline
+
+    # Share of the energy level that remains after the standing loss of each snapshot.
+    standing_loss = n.get_switchable_as_dense(c, "standing_loss")[name]
+    retained = (1 - standing_loss.to_numpy(dtype=float)) ** (
+        n.snapshot_weightings.stores.to_numpy(dtype=float)
+    )
+    held_available = np.clip(retained * level_before - baseline, 0.0, None)
 
     positions = np.concatenate((np.arange(start, n_snapshots), np.arange(start)))
     held_after = level[positions] - baseline
-    held_before = np.concatenate(([held_start], held_after[:-1]))
-    return positions, held_before, held_after
+    held_available = held_available[positions]
+    if static.at[name, cyclic_attr]:
+        # The tracking starts empty at the minimum level.
+        held_available[0] = 0.0
+    return positions, held_available, held_after

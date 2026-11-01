@@ -176,6 +176,65 @@ def test_storage_efficiency_and_marginal_cost():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
+def test_standing_loss_non_cyclic():
+    """Energy held longer suffers more standing losses and costs more.
+
+    1 MWh charged for 10 currency loses 10 % per hour. In hour 3, half of the remaining
+    0.81 MWh is discharged, so half of the account pays for 0.405 MWh: 12.35 currency/MWh.
+    The other half loses another 10 % and is discharged in hour 4: 5 / 0.3645 = 13.72.
+    """
+    n = network_with_buses(range(4), "electricity")
+    n.add(
+        "Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 50, 50, 50]
+    )
+    n.add("Load", "load", bus="electricity", p_set=[0, 0, 0.405, 0.3645])
+    n.add(
+        "StorageUnit",
+        "battery",
+        bus="electricity",
+        p_nom=1,
+        max_hours=1,
+        standing_loss=0.1,
+        cyclic_state_of_charge=False,
+    )
+    n.optimize()
+
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(
+        cost[("Load", "load", "electricity")].iloc[2:], [10 / 0.81, 10 / 0.729]
+    )
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+def test_standing_loss_cyclic_wraps_around():
+    """A cyclic storage charged at the end of the horizon supplies its beginning.
+
+    The storage charges 1 MWh for 10 currency in hour 4 and discharges it in hours 1 and
+    2, with 10 % standing loss per hour: 5 / 0.45 = 11.11 and 5 / 0.405 = 12.35.
+    """
+    n = network_with_buses(range(4), "electricity")
+    n.add(
+        "Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[50, 50, 50, 10]
+    )
+    n.add("Load", "load", bus="electricity", p_set=[0.45, 0.405, 0, 0])
+    n.add(
+        "StorageUnit",
+        "battery",
+        bus="electricity",
+        p_nom=1,
+        max_hours=1,
+        standing_loss=0.1,
+        cyclic_state_of_charge=True,
+    )
+    n.optimize()
+
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(
+        cost[("Load", "load", "electricity")].iloc[:2], [10 / 0.9, 10 / 0.81]
+    )
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
 def test_marginal_cost_storage():
     """Costs for holding energy are paid when the energy is discharged."""
     n = network_with_buses(range(2), "electricity")
