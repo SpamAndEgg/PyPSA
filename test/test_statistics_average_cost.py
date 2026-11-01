@@ -28,6 +28,34 @@ def network_with_buses(snapshots, *buses):
     return n
 
 
+def add_storage(n, component, name, bus, cyclic, initial=0.0, **kwargs):
+    """Add a storage of 1 MWh as StorageUnit or Store with equivalent attributes."""
+    if component == "StorageUnit":
+        n.add(
+            "StorageUnit",
+            name,
+            bus=bus,
+            p_nom=1,
+            max_hours=1,
+            cyclic_state_of_charge=cyclic,
+            state_of_charge_initial=initial,
+            **kwargs,
+        )
+    else:
+        n.add(
+            "Store",
+            name,
+            bus=bus,
+            e_nom=1,
+            e_cyclic=cyclic,
+            e_initial=initial,
+            **kwargs,
+        )
+
+
+STORAGE_COMPONENTS = ["StorageUnit", "Store"]
+
+
 def test_link_efficiency_marginal_cost_and_free_secondary_output():
     """Costs of the input and the link go to bus1, the output at bus2 is free.
 
@@ -176,7 +204,8 @@ def test_storage_efficiency_and_marginal_cost():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
-def test_standing_loss_non_cyclic():
+@pytest.mark.parametrize("component", STORAGE_COMPONENTS)
+def test_standing_loss_non_cyclic(component):
     """Energy held longer suffers more standing losses and costs more.
 
     1 MWh charged for 10 currency loses 10 % per hour. In hour 3, half of the remaining
@@ -188,15 +217,7 @@ def test_standing_loss_non_cyclic():
         "Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 50, 50, 50]
     )
     n.add("Load", "load", bus="electricity", p_set=[0, 0, 0.405, 0.3645])
-    n.add(
-        "StorageUnit",
-        "battery",
-        bus="electricity",
-        p_nom=1,
-        max_hours=1,
-        standing_loss=0.1,
-        cyclic_state_of_charge=False,
-    )
+    add_storage(n, component, "battery", "electricity", cyclic=False, standing_loss=0.1)
     n.optimize()
 
     _, cost = calculate_average_cost(n)
@@ -206,7 +227,8 @@ def test_standing_loss_non_cyclic():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
-def test_standing_loss_cyclic_wraps_around():
+@pytest.mark.parametrize("component", STORAGE_COMPONENTS)
+def test_standing_loss_cyclic_wraps_around(component):
     """A cyclic storage charged at the end of the horizon supplies its beginning.
 
     The storage charges 1 MWh for 10 currency in hour 4 and discharges it in hours 1 and
@@ -217,15 +239,7 @@ def test_standing_loss_cyclic_wraps_around():
         "Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[50, 50, 50, 10]
     )
     n.add("Load", "load", bus="electricity", p_set=[0.45, 0.405, 0, 0])
-    n.add(
-        "StorageUnit",
-        "battery",
-        bus="electricity",
-        p_nom=1,
-        max_hours=1,
-        standing_loss=0.1,
-        cyclic_state_of_charge=True,
-    )
+    add_storage(n, component, "battery", "electricity", cyclic=True, standing_loss=0.1)
     n.optimize()
 
     _, cost = calculate_average_cost(n)
@@ -290,25 +304,71 @@ def test_marginal_cost_storage():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
-def test_non_cyclic_storage():
+@pytest.mark.parametrize("component", STORAGE_COMPONENTS)
+def test_non_cyclic_storage(component):
     """The initial energy of a non-cyclic storage is free."""
     n = network_with_buses(range(2), "electricity")
     n.add("Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 30])
     n.add("Load", "load", bus="electricity", p_set=1)
-    n.add(
-        "StorageUnit",
-        "storage",
-        bus="electricity",
-        p_nom=1,
-        max_hours=1,
-        state_of_charge_initial=1,
-    )
+    add_storage(n, component, "storage", "electricity", cyclic=False, initial=1)
     n.optimize()
 
     _, cost = calculate_average_cost(n)
     np.testing.assert_allclose(
         cost[("Load", "load", "electricity")], [10, 0], atol=1e-9
     )
+
+
+def test_store_marginal_cost_in_both_directions():
+    """A store's marginal cost applies to charging (negative) and discharging.
+
+    The store charges 1 MWh for 10 currency, and its marginal cost of 1 currency/MWh
+    earns 1 on charging, so the account holds 9. Discharging adds 1 again: 10 per MWh.
+    """
+    n = network_with_buses(range(2), "electricity")
+    n.add("Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 30])
+    n.add("Load", "load", bus="electricity", p_set=1)
+    n.add("Store", "store", bus="electricity", e_nom=1, e_cyclic=True, marginal_cost=1)
+    n.optimize()
+
+    opex = n.statistics.opex(groupby_time=False, round=0).loc["Store"]
+    assert (opex < 0).any(axis=None)
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(cost[("Load", "load", "electricity")], [10, 10])
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+@pytest.mark.parametrize("component", ["Line", "Transformer"])
+def test_passive_branch(component):
+    """A line or transformer passes the cost of its input plus its capital cost on.
+
+    Each hour 1 MWh flows from bus a (10 currency/MWh) to bus b. The capital cost of
+    2 currency for the two hours adds 2 / 2 MWh = 1 currency/MWh at bus b.
+    """
+    n = network_with_buses(range(2), "a", "b")
+    n.add("Generator", "grid", bus="a", p_nom=2, marginal_cost=10)
+    n.add("Load", "load", bus="b", p_set=1)
+    n.add(component, "branch", bus0="a", bus1="b", x=0.1, s_nom=1, capital_cost=2)
+    n.optimize()
+
+    df = n.statistics.average_cost(round=10)
+    assert df.at[("Load", "load", "b"), "withdrawal"] == pytest.approx(11)
+    assert df.at[(component, "branch", "a"), "withdrawal"] == pytest.approx(10)
+    assert df.at[(component, "branch", "b"), "supply"] == pytest.approx(11)
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+def test_shunt_impedance_does_not_break_the_calculation():
+    """Shunt impedances have no flows after a linear optimisation and are skipped."""
+    n = network_with_buses(range(2), "a")
+    n.add("Generator", "grid", bus="a", p_nom=2, marginal_cost=10)
+    n.add("Load", "load", bus="a", p_set=1)
+    n.add("ShuntImpedance", "shunt", bus="a", g=0.1)
+    n.optimize()
+
+    energy, _ = calculate_average_cost(n)
+    assert "ShuntImpedance" not in energy.columns.get_level_values("component")
+    assert load_cost(n) == pytest.approx(system_cost(n))
 
 
 def test_capital_cost():
