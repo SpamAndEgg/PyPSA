@@ -285,22 +285,102 @@ def test_electrolyser_with_capital_cost_and_storage():
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
-def test_marginal_cost_storage():
-    """Costs for holding energy are paid when the energy is discharged."""
+def storage_network(component, **kwargs):
+    """Cyclic 1 MWh storage that charges at 10 currency/MWh and discharges in hour 2."""
     n = network_with_buses(range(2), "electricity")
     n.add("Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 30])
     n.add("Load", "load", bus="electricity", p_set=1)
-    n.add(
-        "Store",
-        "storage",
-        bus="electricity",
-        e_nom=1,
-        e_cyclic=True,
-        marginal_cost_storage=2,
+    add_storage(n, component, "storage", "electricity", cyclic=True, **kwargs)
+    return n
+
+
+@pytest.mark.parametrize("component", STORAGE_COMPONENTS)
+@pytest.mark.parametrize(
+    "costs",
+    [
+        {"capital_cost": 2},
+        {"fom_cost": 2},
+        # Annuity 1 / lifetime, scaled to the modelled 2 of 8760 hours: 8760 * 2 / 8760.
+        {"overnight_cost": 8760, "discount_rate": 0, "lifetime": 1},
+    ],
+    ids=["capital_cost", "fom_cost", "overnight_cost"],
+)
+def test_storage_fixed_cost(component, costs):
+    """Fixed costs of a storage are spread over the energy it discharges.
+
+    The storage discharges 1 MWh in hour 2, which costs 10 currency/MWh from charging
+    plus 2 currency fixed costs for the modelled period.
+    """
+    n = storage_network(component, **costs)
+    n.optimize()
+
+    assert n.statistics.capex().sum() + n.statistics.fom().sum() == pytest.approx(2)
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(cost[(component, "storage", "electricity")], [10, 12])
+    np.testing.assert_allclose(cost[("Load", "load", "electricity")], [10, 12])
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+@pytest.mark.parametrize("component", STORAGE_COMPONENTS)
+def test_marginal_cost_storage(component):
+    """Costs for holding energy are paid when the energy is discharged.
+
+    The storage holds 1 MWh at the end of hour 1 for 2 currency/MWh/h, which the
+    discharged energy pays in hour 2: 10 + 2 = 12 currency/MWh.
+    """
+    n = storage_network(component, marginal_cost_storage=2)
+    n.optimize()
+
+    assert n.statistics.opex(cost_types="marginal_cost_storage").sum() == pytest.approx(
+        2
+    )
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(cost[("Load", "load", "electricity")], [10, 12])
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+@pytest.mark.parametrize(
+    ("component", "expected"), [("StorageUnit", 11), ("Store", 12)]
+)
+def test_storage_marginal_cost_quadratic(component, expected):
+    """Quadratic marginal costs of a storage raise the cost of discharged energy.
+
+    Discharging 1 MWh costs 1 currency. For a storage unit, the quadratic cost applies
+    to the dispatch only. For a store, it applies to the net dispatch, so charging adds
+    another 1 currency to the held energy.
+    """
+    n = storage_network(component, marginal_cost_quadratic=1)
+    n.optimize()
+
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(cost[("Load", "load", "electricity")], [10, expected])
+    assert load_cost(n) == pytest.approx(system_cost(n))
+
+
+def test_spill_cost():
+    """Spilling costs are added to the energy held by the storage unit.
+
+    The inflow of 3 MWh in hour 1 exceeds what the storage unit can dispatch (1 MWh)
+    and hold (1 MWh), so 1 MWh is spilled for 1 currency. The dispatch in hour 1 comes
+    from the free inflow, the energy held until hour 2 pays for the spilling.
+    """
+    n = network_with_buses(range(2), "electricity")
+    n.add("Generator", "grid", bus="electricity", p_nom=2, marginal_cost=[10, 30])
+    n.add("Load", "load", bus="electricity", p_set=1)
+    add_storage(
+        n,
+        "StorageUnit",
+        "hydro",
+        "electricity",
+        cyclic=True,
+        inflow=[3, 0],
+        spill_cost=1,
     )
     n.optimize()
 
-    assert n.statistics.opex(cost_types="marginal_cost_storage", round=0).sum() > 0
+    np.testing.assert_allclose(n.storage_units_t.spill["hydro"], [1, 0], atol=1e-9)
+    _, cost = calculate_average_cost(n)
+    np.testing.assert_allclose(cost[("Load", "load", "electricity")], [0, 1], atol=1e-9)
     assert load_cost(n) == pytest.approx(system_cost(n))
 
 
