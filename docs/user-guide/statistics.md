@@ -77,7 +77,10 @@ it passed through. The allocation follows these rules:
 - Storage units and stores pass on the average cost of the energy they hold.
 
 All costs of components supplying energy reach the final withdrawals, also for energy
-flowing in loops. As the costs are taken from the [objective](optimization/objective.md),
+flowing in loops. Only if energy circulates between buses without ever being withdrawn
+by a final consumer (e.g. surplus energy burned in lossy links), its costs cannot be
+passed on: the average costs of those buses are NaN and a warning reports the costs
+that are not attributed. As the costs are taken from the [objective](optimization/objective.md),
 the capital costs are spread over the energy of the modelled snapshots as weighted by
 the [snapshot weightings](design.md). Make sure the snapshot weightings represent the
 period the capital costs refer to (usually a year).

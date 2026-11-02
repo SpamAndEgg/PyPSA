@@ -21,7 +21,10 @@ storages are solved for all snapshots at once:
 with the average cost `c` of bus `b` [currency/MWh], the withdrawal `W` from the
 bus, the cost `K` of the energy held by storage `s` [currency], the share `d` of the
 held energy that is discharged, the local supply costs `L` and the holding costs `H`
-of the storage. Energy flowing in loops needs no special treatment.
+of the storage. Energy flowing in loops needs no special treatment, as long as it
+reaches a final withdrawal. Costs of energy that only circulates between buses (e.g.
+surplus energy burned in lossy links) cannot be passed on, so their average costs are
+undefined (NaN) and the costs are not attributed.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from scipy.sparse.csgraph import breadth_first_order
 from scipy.sparse.linalg import MatrixRankWarning, spsolve
 
 if TYPE_CHECKING:
@@ -213,20 +217,49 @@ def calculate_average_cost(n: Network) -> tuple[pd.DataFrame, pd.DataFrame]:
     logger.debug(
         "Average cost: solving %d unknowns with %d non-zeros.", n_unknowns, matrix.nnz
     )
+
+    # Costs that cannot reach a final withdrawal have no average cost. Their rows are
+    # replaced by c = 0, so that the rest of the system, which does not depend on
+    # them, can be solved.
+    trapped = _get_trapped_unknowns(matrix)
+    if trapped.any():
+        trapped_bus = trapped[:n_bus_unknowns].reshape(n_buses, n_snapshots)
+        logger.warning(
+            "Costs of %.2f currency are not attributed, as energy circulates between "
+            "the buses %s in %d snapshots without being withdrawn by a final consumer "
+            "(e.g. surplus energy burned in lossy links). Their average costs are "
+            "undefined (NaN).",
+            rhs[trapped].sum(),
+            list(buses[trapped_bus.any(axis=1)]),
+            trapped_bus.any(axis=0).sum(),
+        )
+        coo = matrix.tocoo()
+        keep = ~trapped[coo.row]
+        matrix = sp.csc_matrix(
+            (
+                np.concatenate((coo.data[keep], np.ones(trapped.sum()))),
+                (
+                    np.concatenate((coo.row[keep], np.flatnonzero(trapped))),
+                    np.concatenate((coo.col[keep], np.flatnonzero(trapped))),
+                ),
+            ),
+            shape=(n_unknowns, n_unknowns),
+        )
+        rhs[trapped] = 0.0
+
     with warnings.catch_warnings():
         warnings.simplefilter("error", MatrixRankWarning)
         try:
             solution = np.asarray(spsolve(matrix, rhs), dtype=float)
         except MatrixRankWarning as e:
             msg = (
-                "The average cost can not be determined, the linear system is singular. "
-                "This happens if energy only circulates between buses without being "
-                "withdrawn by any final consumer."
+                "The average cost can not be determined, the linear system is singular."
             )
             raise ValueError(msg) from e
     if not np.isfinite(solution).all():
         msg = "The average cost can not be determined, the linear system has no finite solution."
         raise ValueError(msg)
+    solution[trapped] = np.nan
 
     bus_cost = solution[:n_bus_unknowns].reshape(n_buses, n_snapshots).T
     storage_cost = solution[n_bus_unknowns:].reshape(len(storage_flows), n_snapshots).T
@@ -249,6 +282,42 @@ def calculate_average_cost(n: Network) -> tuple[pd.DataFrame, pd.DataFrame]:
         cost[primary_supply] = (supply_cost / energy)[primary_supply]
 
     return df_energy, pd.DataFrame(cost, index=df_energy.index, columns=columns)
+
+
+def _get_trapped_unknowns(matrix: sp.csc_matrix) -> np.ndarray:
+    """Get the unknowns whose costs cannot reach a final withdrawal.
+
+    Costs are passed on without losses: an off-diagonal entry in row v and column u
+    means that costs of u go to v. The column sum is the part of the costs of u that
+    leaves the system through final withdrawals (loads, energy left in storages at the
+    end). If energy only circulates between buses, the costs of those buses cannot
+    leave, the linear system is singular and their average costs are undefined.
+    """
+    n_unknowns = matrix.shape[0]
+    exits = np.flatnonzero(np.asarray(matrix.sum(axis=0)).ravel() > EPS)
+    # Graph with an edge v -> u for costs going from u to v, plus a node connected to
+    # all unknowns with an exit. All unknowns reached from that node pass their costs
+    # on to a final withdrawal.
+    coo = matrix.tocoo()
+    off_diagonal = coo.row != coo.col
+    graph = sp.csr_matrix(
+        (
+            np.ones(off_diagonal.sum() + exits.size),
+            (
+                np.concatenate(
+                    (coo.row[off_diagonal], np.full(exits.size, n_unknowns))
+                ),
+                np.concatenate((coo.col[off_diagonal], exits)),
+            ),
+        ),
+        shape=(n_unknowns + 1, n_unknowns + 1),
+    )
+    reached = breadth_first_order(
+        graph, n_unknowns, directed=True, return_predecessors=False
+    )
+    trapped = np.ones(n_unknowns + 1, dtype=bool)
+    trapped[reached] = False
+    return trapped[:n_unknowns]
 
 
 def _check_supported(n: Network) -> None:
