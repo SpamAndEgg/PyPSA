@@ -15,6 +15,7 @@ SPDX-License-Identifier: CC-BY-4.0
     to install the `master` branch, e.g. `pip install git+https://github.com/pypsa/pypsa`.
 
 ### Features
+- Add [`n.statistics.average_cost()`][pypsa.statistics.StatisticsAccessor.average_cost], which allocates the system costs to the energy flows by proportional sharing. It returns the average cost of the energy supplied and withdrawn by all components, including the costs of upstream conversion and storage, also for energy flowing in loops. See the [:material-book-open-variant: user guide](./user-guide/statistics.md#average-cost).
 - [`add_load_shedding`][pypsa.optimization.optimize.OptimizationAccessor.add_load_shedding] takes a `carrier` argument, defaulting to `"load"`. (<!-- md:pr 2056 -->)
 - Add the volume limits `e_sum_min` and `e_sum_max` to [Link](./user-guide/components/links.md), [Process](./user-guide/components/processes.md) and [Store](./user-guide/components/stores.md) components. (<!-- md:pr 1987 -->)
     - **Behavior change**: With `multi_investment_periods=True`, `e_sum_min` and `e_sum_max` limit the total over all investment periods weighted by the investment period weighting `years`, as for `operational_limit` global constraints. Before, the energy of each period was counted once.
