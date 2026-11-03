@@ -156,31 +156,33 @@ def test_cyclic_energy_flow():
 def test_energy_burned_in_link_loop(caplog):
     """Costs of energy circulating without a final withdrawal are not attributed.
 
-    In hour 2, there is no load on bus a, so the surplus of the must-run generator is
-    burned by sending it around the lossy links a -> b -> a. Its costs cannot reach a
-    final consumer, so the average costs of that loop are undefined. Hour 1 and the
-    separate bus c are not affected.
+    The wind generator has a negative marginal cost (e.g. a subsidy), so the optimiser
+    earns money by producing as much as possible. In hour 2, there is no load on bus a,
+    so the energy is burned by sending it around the lossy links a -> b -> a. Its costs
+    of -10 currency cannot reach a final consumer, so the average costs of that loop
+    are undefined. Hour 1 and the separate bus c are not affected.
     """
     n = network_with_buses(range(2), "a", "b", "c")
-    n.add("Generator", "must run", bus="a", p_nom=1, p_min_pu=1, marginal_cost=10)
+    n.add("Generator", "wind", bus="a", p_nom=1, marginal_cost=-10)
     n.add("Load", "load a", bus="a", p_set=[1, 0])
     n.add("Link", "a to b", bus0="a", bus1="b", p_nom=10, efficiency=0.5)
     n.add("Link", "b to a", bus0="b", bus1="a", p_nom=10, efficiency=0.5)
     n.add("Generator", "generator c", bus="c", p_nom=1, marginal_cost=5)
     n.add("Load", "load c", bus="c", p_set=1)
     n.optimize()
+    assert n.generators_t.p.at[1, "wind"] == pytest.approx(1)
     assert n.links_t.p0.at[1, "a to b"] > 0
 
     _, cost = calculate_average_cost(n)
-    assert "Costs of 10.00 currency are not attributed" in caplog.text
+    assert "Costs of -10.00 currency are not attributed" in caplog.text
     assert np.isnan(cost[("Link", "a to b", "a")].iloc[1])
     # The generator's own supply cost is known, the cost of bus a is not.
-    np.testing.assert_allclose(cost[("Generator", "must run", "a")], [10, 10])
+    np.testing.assert_allclose(cost[("Generator", "wind", "a")], [-10, -10])
 
     df = n.statistics.average_cost(round=10)
-    assert df.at[("Load", "load a", "a"), "withdrawal"] == pytest.approx(10)
+    assert df.at[("Load", "load a", "a"), "withdrawal"] == pytest.approx(-10)
     assert df.at[("Load", "load c", "c"), "withdrawal"] == pytest.approx(5)
-    assert load_cost(n) == pytest.approx(system_cost(n) - 10)
+    assert load_cost(n) == pytest.approx(system_cost(n) + 10)
 
 
 @pytest.mark.parametrize("component", ["StorageUnit", "Store"])

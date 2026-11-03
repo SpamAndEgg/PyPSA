@@ -23,8 +23,9 @@ bus, the cost `K` of the energy held by storage `s` [currency], the share `d` of
 held energy that is discharged, the local supply costs `L` and the holding costs `H`
 of the storage. Energy flowing in loops needs no special treatment, as long as it
 reaches a final withdrawal. Costs of energy that only circulates between buses (e.g.
-surplus energy burned in lossy links) cannot be passed on, so their average costs are
-undefined (NaN) and the costs are not attributed.
+energy with negative marginal costs burned in lossy links for profit) cannot be
+passed on, so their average costs are undefined (NaN) and the costs are not
+attributed.
 """
 
 from __future__ import annotations
@@ -227,8 +228,8 @@ def calculate_average_cost(n: Network) -> tuple[pd.DataFrame, pd.DataFrame]:
         logger.warning(
             "Costs of %.2f currency are not attributed, as energy circulates between "
             "the buses %s in %d snapshots without being withdrawn by a final consumer "
-            "(e.g. surplus energy burned in lossy links). Their average costs are "
-            "undefined (NaN).",
+            "(e.g. energy with negative marginal costs burned in lossy links for "
+            "profit). Their average costs are undefined (NaN).",
             rhs[trapped].sum(),
             list(buses[trapped_bus.any(axis=1)]),
             trapped_bus.any(axis=0).sum(),
